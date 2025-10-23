@@ -20,7 +20,7 @@ from fastapi import (
 from langchain_core.documents import Document
 from langchain_core.runnables import run_in_executor
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from functools import lru_cache
+from functools import lru_cache, partial
 
 from app.config import logger, vector_store, RAG_UPLOAD_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 from app.constants import ERROR_MESSAGES
@@ -31,6 +31,7 @@ from app.models import (
     QueryMultipleBody,
 )
 from app.services.vector_store.async_pg_vector import AsyncPgVector
+from app.services.vector_store.atlas_mongo_vector import AtlasMongoVector
 from app.utils.document_loader import (
     get_loader,
     clean_text,
@@ -40,6 +41,10 @@ from app.utils.document_loader import (
 from app.utils.health import is_health_ok
 
 router = APIRouter()
+
+
+async def run_sync_vector_operation(executor, func, *args, **kwargs):
+    return await run_in_executor(executor, partial(func, *args, **kwargs))
 
 
 def get_user_id(request: Request, entity_id: str = None) -> str:
@@ -135,6 +140,11 @@ async def get_all_ids(request: Request):
     try:
         if isinstance(vector_store, AsyncPgVector):
             ids = await vector_store.get_all_ids(executor=request.app.state.thread_pool)
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            ids = await run_sync_vector_operation(
+                executor, vector_store.get_all_ids
+            )
         else:
             ids = vector_store.get_all_ids()
 
@@ -182,6 +192,14 @@ async def get_documents_by_ids(request: Request, ids: list[str] = Query(...)):
             documents = await vector_store.get_documents_by_ids(
                 ids, executor=request.app.state.thread_pool
             )
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            existing_ids = await run_sync_vector_operation(
+                executor, vector_store.get_filtered_ids, ids
+            )
+            documents = await run_sync_vector_operation(
+                executor, vector_store.get_documents_by_ids, ids
+            )
         else:
             existing_ids = vector_store.get_filtered_ids(ids)
             documents = vector_store.get_documents_by_ids(ids)
@@ -223,6 +241,14 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
             )
             await vector_store.delete(
                 ids=document_ids, executor=request.app.state.thread_pool
+            )
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            existing_ids = await run_sync_vector_operation(
+                executor, vector_store.get_filtered_ids, document_ids
+            )
+            await run_sync_vector_operation(
+                executor, vector_store.delete, ids=document_ids
             )
         else:
             existing_ids = vector_store.get_filtered_ids(document_ids)
@@ -281,6 +307,15 @@ async def query_embeddings_by_file_id(
                 k=body.k,
                 filter={"file_id": body.file_id},
                 executor=request.app.state.thread_pool,
+            )
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            documents = await run_sync_vector_operation(
+                executor,
+                vector_store.similarity_search_with_score_by_vector,
+                embedding,
+                k=body.k,
+                filter={"file_id": body.file_id},
             )
         else:
             documents = vector_store.similarity_search_with_score_by_vector(
@@ -381,6 +416,13 @@ async def store_data_in_vector_db(
         if isinstance(vector_store, AsyncPgVector):
             ids = await vector_store.aadd_documents(
                 docs, ids=[file_id] * len(documents), executor=executor
+            )
+        elif isinstance(vector_store, AtlasMongoVector):
+            ids = await run_sync_vector_operation(
+                executor,
+                vector_store.add_documents,
+                docs,
+                ids=[file_id] * len(documents),
             )
         else:
             ids = vector_store.add_documents(docs, ids=[file_id] * len(documents))
@@ -559,6 +601,14 @@ async def load_document_context(request: Request, id: str):
             documents = await vector_store.get_documents_by_ids(
                 ids, executor=request.app.state.thread_pool
             )
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            existing_ids = await run_sync_vector_operation(
+                executor, vector_store.get_filtered_ids, ids
+            )
+            documents = await run_sync_vector_operation(
+                executor, vector_store.get_documents_by_ids, ids
+            )
         else:
             existing_ids = vector_store.get_filtered_ids(ids)
             documents = vector_store.get_documents_by_ids(ids)
@@ -672,6 +722,15 @@ async def query_embeddings_by_file_ids(request: Request, body: QueryMultipleBody
                 k=body.k,
                 filter={"file_id": {"$in": body.file_ids}},
                 executor=request.app.state.thread_pool,
+            )
+        elif isinstance(vector_store, AtlasMongoVector):
+            executor = getattr(request.app.state, "thread_pool", None)
+            documents = await run_sync_vector_operation(
+                executor,
+                vector_store.similarity_search_with_score_by_vector,
+                embedding,
+                k=body.k,
+                filter={"file_id": {"$in": body.file_ids}},
             )
         else:
             documents = vector_store.similarity_search_with_score_by_vector(

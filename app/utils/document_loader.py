@@ -68,6 +68,66 @@ def cleanup_temp_encoding_file(loader) -> None:
             logger.warning(f"Failed to remove temporary UTF-8 file: {e}")
 
 
+def create_text_loader(filepath: str) -> TextLoader:
+    """
+    Create a TextLoader that respects the source file encoding. For encodings
+    other than UTF-8, convert the file to a temporary UTF-8 copy to ensure the
+    underlying loader can parse it correctly.
+    """
+    encoding = detect_file_encoding(filepath)
+    normalized = encoding.lower()
+
+    if normalized in ("utf-8", "utf8"):
+        loader = TextLoader(filepath, encoding="utf-8")
+        loader._temp_filepath = None
+        loader._detected_encoding = encoding
+        return loader
+
+    if normalized == "utf-8-sig":
+        loader = TextLoader(filepath, encoding="utf-8-sig")
+        loader._temp_filepath = None
+        loader._detected_encoding = encoding
+        return loader
+
+    # ASCII can be handled as UTF-8 without conversion
+    if normalized == "ascii":
+        loader = TextLoader(filepath, encoding="utf-8")
+        loader._temp_filepath = None
+        loader._detected_encoding = encoding
+        return loader
+
+    temp_file = None
+    suffix = os.path.splitext(filepath)[1] or ".txt"
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=suffix, delete=False
+        ) as temp_file:
+            with open(filepath, "r", encoding=encoding, errors="replace") as original:
+                temp_file.write(original.read())
+
+            temp_filepath = temp_file.name
+
+        loader = TextLoader(temp_filepath, encoding="utf-8")
+        loader._temp_filepath = temp_filepath
+        loader._detected_encoding = encoding
+        return loader
+    except Exception as exc:
+        if temp_file and os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+
+        logger.warning(
+            "Failed to normalize encoding for %s using %s: %s. Falling back to autodetect.",
+            filepath,
+            encoding,
+            exc,
+        )
+        loader = TextLoader(filepath, autodetect_encoding=True)
+        loader._temp_filepath = None
+        loader._detected_encoding = encoding
+        return loader
+
+
 def get_loader(filename: str, file_content_type: str, filepath: str):
     """Get the appropriate document loader based on file type and\or content type."""
     file_ext = filename.split(".")[-1].lower()
@@ -143,13 +203,13 @@ def get_loader(filename: str, file_content_type: str, filepath: str):
     ]:
         loader = UnstructuredExcelLoader(filepath)
     elif file_ext == "json" or file_content_type == "application/json":
-        loader = TextLoader(filepath, autodetect_encoding=True)
+        loader = create_text_loader(filepath)
     elif file_ext in known_source_ext or (
         file_content_type and file_content_type.find("text/") >= 0
     ):
-        loader = TextLoader(filepath, autodetect_encoding=True)
+        loader = create_text_loader(filepath)
     else:
-        loader = TextLoader(filepath, autodetect_encoding=True)
+        loader = create_text_loader(filepath)
         known_type = False
 
     return loader, known_type, file_ext
